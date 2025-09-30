@@ -32,22 +32,41 @@ npm start
 
 ## Backend/LLM Integration
 
-Currently the ChatService simulates:
-1. Planning (plan/route)
-2. Retrieval (retrieve)
-3. Context packing (pack)
-4. Generation (generate) with mock LLM metadata
+The ChatService now supports a real backend via an injectable `LlmClientService`:
+- Configuration is provided via environment files using build-time variables.
+- If the backend is not configured, the app preserves the original mock behavior for local development.
 
-To integrate a real backend:
-- Replace the mocked pipeline in `ChatService.sendMessage()` with your HTTP/WebSocket flow.
-- On retrieval completion, call `this.mcp.appendStep(turnId, { type: 'retrieve', ... })` with your retrieved items.
-- Before model call, append a `pack` step with your context window composition.
-- After model call, append a `generate` step with `model` info (model name, params, token usage, latency).
-- Attach backend-returned `RagContext` to the reply message as `context` and include `llm` metadata.
+How it works:
+1. `ChatService.sendMessage()` normalizes input and creates a protocol turn.
+2. If environment variables provide `ENV_LLM_API_URL`, the service calls the backend using `LlmClientService.chatCompletions()`:
+   - It passes conversation messages, selected agent id, and optional model params.
+   - The backend may return: assistant content, RAG context, LLM model metadata, and optional MCP steps.
+   - Any returned protocol steps are appended to the Model Context Protocol timeline.
+3. If the backend is unavailable or returns an error, the service falls back to the local mock pipeline (plan → retrieve → pack → generate), ensuring a seamless UX.
 
-Environment variables:
-- Do not hardcode URLs or keys. Add a `.env.example` with variables (e.g., ANGULAR_APP_API_URL) and read via your preferred mechanism (build-time replacement, etc.). The orchestrator will provide real values.
+Environment variables (build-time):
+- ENV_LLM_API_URL: Base URL of your backend (e.g., https://api.example.com)
+- ENV_LLM_API_KEY: Optional secret for Authorization header
+- ENV_LLM_CHAT_COMPLETIONS_PATH: Path for chat completions (default /v1/chat/completions)
+- ENV_LLM_TIMEOUT_MS: Request timeout in ms (default 20000)
+
+See `.env.example` for a template. The deployment orchestrator maps real values into these variables during build.
+
+Customizing endpoints:
+- Edit `src/environments/*` to adjust endpoint paths and defaults.
+- `LlmClientService` composes URLs as `${LLM_API_URL}/${LLM_CHAT_COMPLETIONS_PATH}`.
+
+WebSocket support (optional):
+- This implementation uses REST via HttpClient.
+- To add WebSocket streaming later, create a `LlmSocketClientService` with a similar interface and inject it instead of (or alongside) `LlmClientService`.
+
+Security:
+- Do not hardcode secrets. Provide keys via environment variables only.
+- Consider a backend proxy to avoid exposing third-party model API keys to the browser.
 
 ## Notes
 
-This frontend uses a mocked ChatService to simulate multi-agent behavior, RAG context, LLM generation, and a Model Context Protocol timeline. Integrate with your backend by replacing the mocked flows with HTTP/WebSocket calls in `ChatService` and keeping MCP updates in `ModelContextService`.
+This frontend will:
+- Use the backend for live responses and RAG when configured.
+- Visualize MCP steps returned by the backend or locally synthesized ones.
+- Maintain full functionality with mocked data when no backend config is present.

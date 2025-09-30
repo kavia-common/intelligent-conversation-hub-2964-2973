@@ -1,17 +1,20 @@
-import { Injectable } from '@angular/core';
-import { BehaviorSubject, Observable, of, delay, map, tap } from 'rxjs';
+import { Injectable, inject } from '@angular/core';
+import { BehaviorSubject, Observable, of, delay, map, tap, catchError, switchMap } from 'rxjs';
 import { AgentSummary, Conversation, Message, RagChunk, RagContext } from '../models/chat.models';
 import { ModelContextService } from './model-context.service';
-import { ContextWindowItem, ModelCallInfo, ProtocolActor } from '../models/context.models';
+import { ContextWindowItem, ModelCallInfo, ProtocolActor, ProtocolStep } from '../models/context.models';
+import { LlmClientService, LlmChatCompletionRequest, LlmChatCompletionResponse } from './llm-client.service';
 
 /**
- * ChatService manages conversations, messages, agent states, and mock RAG retrieval.
- * In a real integration, replace the mock flows with HTTP/WebSocket calls.
+ * ChatService manages conversations, messages, agent states, and RAG/LLM integration.
+ * It uses a real backend via LlmClientService when configured. If not, it falls back to the previous mock pipeline.
  */
 @Injectable({ providedIn: 'root' })
 export class ChatService {
 
   constructor(private mcp: ModelContextService) {}
+
+  private llm = inject(LlmClientService);
 
   private uuid(): string {
     // Prefer Web Crypto UUID if available
@@ -138,20 +141,17 @@ export class ChatService {
   // PUBLIC_INTERFACE
   sendMessage(content: string): Observable<Message> {
     /**
-     * Sends a user message and simulates agent pipeline:
-     * 1) Planner plans (MCP: plan)
-     * 2) Researcher retrieves RAG (MCP: retrieve)
-     * 3) Pack context for LLM (MCP: pack)
-     * 4) Writer calls LLM to compose reply (MCP: generate)
-     * Improves: input sanitization, query reformulation, retrieval ranking, context packing tokens, and tailored reply.
+     * Sends a user message.
+     * If backend is configured, dispatch to LLM API with full context.
+     * Otherwise, use the legacy mock pipeline to simulate RAG + LLM.
      */
     const convId = this.activeConversationId$.value;
-    const selectedAgentId = this.activeAgentId$.value || 'writer'; // ensure non-empty for labeling
+    const selectedAgentId = this.activeAgentId$.value || 'writer';
 
     // Normalize/sanitize the user content
     const raw = (content ?? '').toString();
     const cleaned = raw.replace(/\s+/g, ' ').trim();
-    const safeContent = cleaned.slice(0, 4000); // cap to avoid oversized UI payloads
+    const safeContent = cleaned.slice(0, 4000);
 
     const turnId = this.uuid();
     this.mcp.addProtocol(turnId);
@@ -165,13 +165,142 @@ export class ChatService {
     };
     this.pushMessage(convId, userMsg);
 
+    if (!this.llm.isConfigured()) {
+      // Backend not configured -> use mock path
+      return this.sendMessageMockPath(convId, selectedAgentId, safeContent, turnId, userMsg);
+    }
+
+    // Backend configured -> prepare request
+    const planner: ProtocolActor = { id: 'planner', name: 'Planner', icon: '🧭' };
+    const start = Date.now();
+    this.setAgentState('planner', 'thinking', 'Contacting backend…');
+
+    const req: LlmChatCompletionRequest = {
+      messages: [
+        { role: 'system', content: 'You are a helpful, precise assistant. Cite evidence concisely.' },
+        { role: 'user', content: safeContent },
+      ],
+      agentId: selectedAgentId,
+      params: { temperature: 0.3, max_tokens: 512, top_p: 1.0 },
+      rag: { enable: true, k: 5 }
+    };
+
+    // Log initial plan in MCP
+    this.mcp.appendStep(turnId, {
+      id: this.uuid(),
+      at: new Date().toISOString(),
+      type: 'plan',
+      actor: planner,
+      input: { text: safeContent },
+      output: { text: 'Send to LLM backend with optional RAG.' },
+      note: 'Frontend delegated retrieval and generation to backend.'
+    });
+
+    return of(null).pipe(
+      switchMap(() => this.llm.chatCompletions(req)),
+      tap((res) => {
+        // Render backend-provided MCP, if any
+        this.applyBackendProtocol(turnId, res);
+
+        // Compose message from backend result
+        // Normalize backend llm metadata to match frontend type expectations
+        const normLlm = res.llm
+          ? {
+              model: res.llm.model,
+              params: this.toNumberRecord(res.llm.params),
+              tokens: {
+                prompt: this.toNumberOrUndefined((res.llm.tokens as any)?.prompt),
+                completion: this.toNumberOrUndefined((res.llm.tokens as any)?.completion),
+                total: this.toNumberOrUndefined((res.llm.tokens as any)?.total),
+              },
+              latencyMs: this.toNumberOrUndefined(res.llm.latencyMs),
+            }
+          : undefined;
+
+        const reply: Message = {
+          id: this.uuid(),
+          role: 'agent',
+          content: res.content || '(no content)',
+          timestamp: new Date().toISOString(),
+          agentId: selectedAgentId,
+          context: res.context as RagContext | undefined,
+          llm: normLlm,
+          protocolTurnId: turnId,
+        };
+        this.pushMessage(convId, reply);
+      }),
+      tap(() => {
+        // Update agent states
+        this.setAgentState('planner', 'idle');
+      }),
+      map(() => userMsg),
+      catchError((err) => {
+        // If backend fails, gracefully fall back to mock path while indicating error in MCP
+        this.mcp.appendStep(turnId, {
+          id: this.uuid(),
+          at: new Date().toISOString(),
+          type: 'error',
+          actor: { id: 'backend', name: 'Backend', icon: '🛠️' },
+          note: `Backend error: ${err?.message || String(err)}`
+        });
+        return this.sendMessageMockPath(convId, selectedAgentId, safeContent, turnId, userMsg);
+      })
+    );
+  }
+
+  private applyBackendProtocol(turnId: string, res: LlmChatCompletionResponse) {
+    // Convert backend protocol (if present) into our MCP structure
+    const steps = (res.protocol || []) as any[];
+    for (const s of steps) {
+      const step: ProtocolStep = {
+        id: s.id || this.uuid(),
+        at: s.at || new Date().toISOString(),
+        type: (s.type as any) || 'plan',
+        actor: s.actor || { id: 'backend', name: 'Backend', icon: '🛠️' },
+        input: s.input,
+        output: s.output,
+        retrieval: s.retrieval,
+        contextWindow: s.contextWindow,
+        model: s.model,
+        note: s.note,
+      };
+      this.mcp.appendStep(turnId, step);
+    }
+  }
+
+  private toNumberOrUndefined(v: any): number | undefined {
+    const n = Number(v);
+    return isFinite(n) && !isNaN(n) ? n : undefined;
+  }
+
+  private toNumberRecord(
+    obj: Record<string, number | string | boolean | undefined> | undefined
+  ): Record<string, number> | undefined {
+    if (!obj) return undefined;
+    const out: Record<string, number> = {};
+    for (const k of Object.keys(obj)) {
+      const val = (obj as any)[k];
+      const n = Number(val);
+      if (isFinite(n) && !isNaN(n)) {
+        out[k] = n;
+      }
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+
+  private sendMessageMockPath(
+    convId: string,
+    selectedAgentId: string,
+    safeContent: string,
+    turnId: string,
+    userMsg: Message
+  ): Observable<Message> {
     const planner: ProtocolActor = { id: 'planner', name: 'Planner', icon: '🧭' };
     const researcher: ProtocolActor = { id: 'researcher', name: 'Researcher', icon: '🔎' };
     const writer: ProtocolActor = { id: 'writer', name: 'Writer', icon: '✍️' };
 
     this.setAgentState('planner', 'thinking', 'Analyzing task…');
 
-    // Step: query reformulation for retrieval (simple heuristic)
     const reformulated = this.rewriteQueryForRetrieval(safeContent);
     this.mcp.appendStep(turnId, {
       id: this.uuid(),
@@ -266,6 +395,7 @@ export class ChatService {
 
         // Generation
         this.setAgentState('writer', 'thinking', 'Drafting response…');
+        const start = Date.now();
         const safeSetTimeout = (fn: () => void, ms: number) => {
           try {
             if (typeof globalThis !== 'undefined' && typeof (globalThis as any).setTimeout === 'function') {
@@ -277,7 +407,6 @@ export class ChatService {
           return undefined as unknown as number;
         };
 
-        const start = Date.now();
         safeSetTimeout(() => {
           this.setAgentState('planner', 'idle');
           this.setAgentState('researcher', 'idle');
@@ -295,7 +424,7 @@ export class ChatService {
             }
           };
 
-        this.setAgentState('writer', 'responding', 'Finalizing response…');
+          this.setAgentState('writer', 'responding', 'Finalizing response…');
           const replyText = this.generateReplyTailored(safeContent, rag, selectedAgentId);
           const reply: Message = {
             id: this.uuid(),
@@ -313,7 +442,7 @@ export class ChatService {
             id: this.uuid(),
             at: new Date().toISOString(),
             type: 'generate',
-            actor: writer,
+            actor: { id: 'writer', name: 'Writer', icon: '✍️' },
             input: { text: safeContent, fields: { packedItems: contextItems.length } },
             output: { text: reply.content },
             model: llmInfo,
