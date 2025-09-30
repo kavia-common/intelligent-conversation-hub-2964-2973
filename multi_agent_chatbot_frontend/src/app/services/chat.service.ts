@@ -143,9 +143,15 @@ export class ChatService {
      * 2) Researcher retrieves RAG (MCP: retrieve)
      * 3) Pack context for LLM (MCP: pack)
      * 4) Writer calls LLM to compose reply (MCP: generate)
+     * Improves: input sanitization, query reformulation, retrieval ranking, context packing tokens, and tailored reply.
      */
     const convId = this.activeConversationId$.value;
-    const agentId = this.activeAgentId$.value;
+    const selectedAgentId = this.activeAgentId$.value || 'writer'; // ensure non-empty for labeling
+
+    // Normalize/sanitize the user content
+    const raw = (content ?? '').toString();
+    const cleaned = raw.replace(/\s+/g, ' ').trim();
+    const safeContent = cleaned.slice(0, 4000); // cap to avoid oversized UI payloads
 
     const turnId = this.uuid();
     this.mcp.addProtocol(turnId);
@@ -153,7 +159,7 @@ export class ChatService {
     const userMsg: Message = {
       id: this.uuid(),
       role: 'user',
-      content,
+      content: safeContent,
       timestamp: new Date().toISOString(),
       protocolTurnId: turnId
     };
@@ -163,23 +169,24 @@ export class ChatService {
     const researcher: ProtocolActor = { id: 'researcher', name: 'Researcher', icon: '🔎' };
     const writer: ProtocolActor = { id: 'writer', name: 'Writer', icon: '✍️' };
 
-    this.setAgentState('planner', 'thinking', 'Analyzing task...'); // UI indicator
+    this.setAgentState('planner', 'thinking', 'Analyzing task…');
 
-    // MCP: plan
+    // Step: query reformulation for retrieval (simple heuristic)
+    const reformulated = this.rewriteQueryForRetrieval(safeContent);
     this.mcp.appendStep(turnId, {
       id: this.uuid(),
       at: new Date().toISOString(),
       type: 'plan',
       actor: planner,
-      input: { text: content },
-      output: { text: 'Decompose into: (1) retrieve relevant docs, (2) synthesize an answer.' },
-      note: 'Planner created a plan to retrieve and then generate.'
+      input: { text: safeContent, fields: { originalLength: safeContent.length } },
+      output: { text: `Plan: retrieve • pack • generate. Reformulated query: "${reformulated}"` },
+      note: 'Planner refined the query to improve retrieval.'
     });
 
     return of(true).pipe(
-      delay(600),
+      delay(400),
       tap(() => {
-        this.setAgentState('planner', 'retrieving', 'Scoping and delegating...');
+        this.setAgentState('planner', 'retrieving', 'Scoping and delegating…');
         this.mcp.appendStep(turnId, {
           id: this.uuid(),
           at: new Date().toISOString(),
@@ -189,47 +196,62 @@ export class ChatService {
           note: 'Planner routed subtasks to agents.'
         });
       }),
-      delay(500),
+      delay(400),
       tap(() => {
-        // MCP: retrieve
-        this.setAgentState('planner', 'responding', 'Coordinating agents...');
-        this.setAgentState('researcher', 'retrieving', 'Searching knowledge base...');
+        // Retrieval
+        this.setAgentState('researcher', 'retrieving', 'Searching knowledge base…');
+        const chunksRaw = this.mockRag(reformulated || safeContent);
 
-        const chunks = this.mockRag(content);
+        // Deduplicate by title/source and re-rank by score
+        const seen = new Set<string>();
+        const chunks = chunksRaw
+          .filter(c => {
+            const key = (c.title || c.source || '').toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+          .slice(0, 5);
+
         const nowISO = new Date().toISOString();
-
         this.mcp.appendStep(turnId, {
           id: this.uuid(),
           at: nowISO,
           type: 'retrieve',
           actor: researcher,
-          input: { text: content },
+          input: { text: reformulated || safeContent },
           retrieval: {
-            query: content,
+            query: reformulated || safeContent,
             items: chunks.map(c => ({
-              id: c.id, source: c.source, title: c.title, snippet: c.snippet, score: c.score, url: c.url
+              id: c.id,
+              source: c.source,
+              title: c.title,
+              snippet: c.snippet,
+              score: c.score,
+              url: c.url
             }))
           },
-          note: 'Retrieved top-k documents for grounding.'
+          note: `Retrieved ${chunks.length} unique items after deduplication and ranking.`
         });
 
         const rag: RagContext = {
-          query: content,
+          query: reformulated || safeContent,
           chunks,
           usedAt: nowISO
         };
 
-        this.setAgentState('researcher', 'responding', 'Ranking and summarizing...');
-
-        // MCP: pack
+        // Context packing
+        this.setAgentState('researcher', 'responding', 'Ranking and summarizing…');
         const contextItems: ContextWindowItem[] = [
-          { id: this.uuid(), type: 'system', text: 'You are a helpful multi-agent assistant.' },
-          { id: this.uuid(), type: 'history', text: `User: ${content}` },
+          { id: this.uuid(), type: 'system', text: 'You are a helpful, precise assistant. Cite evidence concisely.' , tokens: 16, origin: 'system' },
+          { id: this.uuid(), type: 'history', text: `User: ${safeContent}`, tokens: Math.min(24 + Math.floor(safeContent.length / 3), 256), origin: 'user' },
           ...rag.chunks.slice(0, 3).map(ch => ({
             id: ch.id,
             type: 'retrieval' as const,
             text: `[${ch.title ?? ch.source}] ${ch.snippet}`,
-            origin: ch.source
+            origin: ch.source,
+            tokens: Math.min(60 + Math.floor((ch.snippet || '').length / 4), 200)
           }))
         ];
 
@@ -239,17 +261,19 @@ export class ChatService {
           type: 'pack',
           actor: planner,
           contextWindow: contextItems,
-          note: 'Packed system, user input, and top retrievals into context window.'
+          note: 'Packed system guidance, user input, and top retrievals (3) with token estimates.'
         });
 
-        // MCP: generate (LLM call)
-        this.setAgentState('writer', 'thinking', 'Drafting response...');
+        // Generation
+        this.setAgentState('writer', 'thinking', 'Drafting response…');
         const safeSetTimeout = (fn: () => void, ms: number) => {
           try {
             if (typeof globalThis !== 'undefined' && typeof (globalThis as any).setTimeout === 'function') {
               return (globalThis as any).setTimeout(fn, ms);
             }
-          } catch { /* ignore */ }
+          } catch {
+            // ignore
+          }
           return undefined as unknown as number;
         };
 
@@ -259,20 +283,26 @@ export class ChatService {
           this.setAgentState('researcher', 'idle');
 
           const latency = Date.now() - start;
+          const promptTokens = contextItems.reduce((acc, it) => acc + (it.tokens ?? 50), 0);
           const llmInfo: ModelCallInfo = {
             model: 'mock-gpt-4o-mini',
             params: { temperature: 0.3, max_tokens: 512, top_p: 1.0 },
             latencyMs: latency,
-            tokens: { prompt: 320, completion: 120, total: 440 }
+            tokens: {
+              prompt: promptTokens,
+              completion: 160,
+              total: promptTokens + 160
+            }
           };
 
-          this.setAgentState('writer', 'responding', 'Finalizing response...');
+        this.setAgentState('writer', 'responding', 'Finalizing response…');
+          const replyText = this.generateReplyTailored(safeContent, rag, selectedAgentId);
           const reply: Message = {
             id: this.uuid(),
             role: 'agent',
-            content: this.generateReply(content, rag),
+            content: replyText,
             timestamp: new Date().toISOString(),
-            agentId,
+            agentId: selectedAgentId,
             context: rag,
             llm: llmInfo,
             protocolTurnId: turnId
@@ -284,10 +314,10 @@ export class ChatService {
             at: new Date().toISOString(),
             type: 'generate',
             actor: writer,
-            input: { text: content, fields: { packedItems: contextItems.length } },
+            input: { text: safeContent, fields: { packedItems: contextItems.length } },
             output: { text: reply.content },
             model: llmInfo,
-            note: 'LLM produced grounded response.'
+            note: 'LLM produced grounded response informed by retrieval.'
           });
 
           this.setAgentState('writer', 'idle');
@@ -314,16 +344,65 @@ export class ChatService {
   }
 
   private mockRag(query: string): RagChunk[] {
+    // Simple query-aware mock: add basic synthetic signals and query echo for grounding.
+    const q = (query || '').trim();
     const base: RagChunk[] = [
       { id: this.uuid(), source: 'docs/guide.md', title: 'RAG Overview', snippet: 'RAG combines retrieval with generation to ground responses.', score: 0.92, url: '#' },
       { id: this.uuid(), source: 'blog/agents', title: 'Agent Collaboration', snippet: 'Planner, Researcher, and Writer coordinate to answer complex queries.', score: 0.88, url: '#' },
       { id: this.uuid(), source: 'kb/context', title: 'Context Windows', snippet: 'Efficient context packing improves factual grounding.', score: 0.81, url: '#' },
+      { id: this.uuid(), source: 'kb/evaluation', title: 'Answer Quality', snippet: 'Grounded responses cite evidence and include caveats when needed.', score: 0.77, url: '#' }
     ];
-    return base.map((c, i) => ({ ...c, snippet: `${c.snippet} [q:${query.slice(0, 24)}...]` , score: c.score ? +(c.score - i * 0.03).toFixed(2) : undefined }));
+    const echoed = base.map((c, i) => ({
+      ...c,
+      snippet: `${c.snippet} [q:${q.slice(0, 48)}${q.length > 48 ? '…' : ''}]`,
+      score: c.score ? +(c.score - i * 0.025).toFixed(2) : undefined
+    }));
+    return echoed;
   }
 
   private generateReply(userText: string, rag: RagContext): string {
-    const top = rag.chunks.slice(0, 2).map(c => `- ${c.title ?? c.source}: ${c.snippet}`).join('\n');
-    return `Here's a synthesized answer based on retrieved context.\n\nKey evidence:\n${top}\n\nIn summary, ${userText.trim()} can be approached by combining planning, targeted retrieval, and clear synthesis aligned with your goals.`;
+    // legacy path retained for compatibility; now call tailored generator
+    return this.generateReplyTailored(userText, rag, 'writer');
+  }
+
+  private generateReplyTailored(userText: string, rag: RagContext, agentId: string): string {
+    const ask = (userText || '').trim();
+    const bullets = rag.chunks.slice(0, 3).map(c => `• ${c.title ?? c.source}: ${c.snippet}`).join('\n');
+    const preface =
+      agentId === 'planner'
+        ? 'Plan of action'
+        : agentId === 'researcher'
+          ? 'Evidence-based findings'
+          : 'Synthesis';
+
+    const styleHint =
+      agentId === 'planner'
+        ? 'I will outline steps and responsibilities.'
+        : agentId === 'researcher'
+          ? 'I will emphasize sources and confidence.'
+          : 'I will keep the explanation concise and practical.';
+
+    const caveat = 'If additional precision is required, please provide constraints, expected format, or target audience.';
+    return `${preface} for your request: "${ask}"
+
+Key evidence:
+${bullets || '• (no retrieved evidence available)'}
+
+${styleHint}
+Answer:
+Based on the retrieved context, here is a grounded response tailored to your query. Where appropriate, I cite evidence from the items above and avoid speculation.
+
+${caveat}`;
+  }
+
+  private rewriteQueryForRetrieval(text: string): string {
+    // Very simple heuristic: remove pleasantries and keep keywords
+    const cleaned = (text || '').toLowerCase()
+      .replace(/\b(please|kindly|can you|could you|would you|thanks|thank you)\b/g, '')
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    // Keep top 10 tokens as a "query"
+    return cleaned.split(' ').slice(0, 10).join(' ');
   }
 }
