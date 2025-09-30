@@ -1,0 +1,73 @@
+<div class="qa-container card">
+  <div class="qa-input">
+    <label class="qa-label" for="q">Ask a question</label>
+    <textarea
+      id="q"
+      class="textarea"
+      rows="2"
+      placeholder="Type your question… Press Ctrl/⌘ + Enter to ask"
+      [ngModel]="question()"
+      (ngModelChange)="question.set($event)"
+      (keydown)="onKeydown($event)"
+      aria-label="Question input"
+    ></textarea>
+    <div class="qa-actions">
+      <button class="btn btn-primary" (click)="ask()" [disabled]="sending() || !question().trim()">
+        {{ sending() ? 'Asking…' : 'Ask' }}
+      </button>
+    </div>
+  </div>
+
+  <div class="qa-answer" *ngIf="answerMsg() as ans">
+    <div class="qa-section-title">
+      <span>Answer</span>
+      <span *ngIf="ans.llm?.model" class="badge" title="Model">{{ ans.llm?.model }}</span>
+      <span *ngIf="ans.llm?.latencyMs" class="badge" title="Latency">{{ ans.llm?.latencyMs }}ms</span>
+    </div>
+    <div class="qa-answer-body">
+      <pre style="white-space: pre-wrap; font: inherit;">{{ ans.content }}</pre>
+    </div>
+
+    <div class="qa-section" *ngIf="ans.context">
+      <div class="qa-section-title"><span>RAG Evidence</span></div>
+      <ul class="qa-evidence-list">
+        <li *ngFor="let ch of ans.context?.chunks">
+          <div class="ev-title">
+            <span>{{ ch.title || ch.source }}</span>
+            <span *ngIf="ch.score != null" class="badge" title="Score">{{ ch.score }}</span>
+          </div>
+          <div class="ev-snippet">{{ ch.snippet }}</div>
+          <div class="ev-meta" *ngIf="ch.url || ch.source">
+            <a *ngIf="ch.url" [href]="ch.url" target="_blank" rel="noopener noreferrer">{{ ch.url }}</a>
+            <span *ngIf="!ch.url">{{ ch.source }}</span>
+          </div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="qa-section">
+      <div class="qa-section-title"><span>Model Context Protocol</span></div>
+      <div class="mcp-list">
+        <div class="mcp-item" *ngFor="let step of getProtocolSteps()">
+          <div class="mcp-head">
+            <span class="badge">{{ (step.actor && step.actor.icon) ? step.actor.icon : '🔷' }} {{ (step.actor && step.actor.name) ? step.actor.name : 'Actor' }}</span>
+            <span class="badge mcp-type">{{ step.type }}</span>
+          </div>
+          <div class="mcp-body">
+            <div *ngIf="step.input?.text"><strong>Input:</strong> {{ step.input?.text }}</div>
+            <div *ngIf="step.retrieval"><strong>Retrieved:</strong> {{ step.retrieval.items.length }} items</div>
+            <div *ngIf="step.contextWindow"><strong>Packed:</strong> {{ step.contextWindow.length }} items</div>
+            <div *ngIf="step.model"><strong>Model:</strong> {{ step.model.model }} • {{ step.model.latencyMs || 0 }}ms</div>
+            <div *ngIf="step.output?.text"><strong>Output:</strong> {{ step.output?.text }}</div>
+            <div *ngIf="step.note" class="mcp-note">{{ step.note }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="qa-empty" *ngIf="!answerMsg()">
+    <div class="brand-badge" aria-hidden="true">💠</div>
+    <div class="hint">Ask a question to see the answer, evidence, and context steps.</div>
+  </div>
+</div>

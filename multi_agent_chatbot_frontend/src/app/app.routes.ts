@@ -1,7 +1,7 @@
 import { Routes } from '@angular/router';
-import { ChatPageComponent } from './pages/chat-page/chat-page.component';
+import { QaPageComponent } from './pages/qa-page/qa-page.component';
 
 export const routes: Routes = [
-  { path: '', component: ChatPageComponent, pathMatch: 'full' },
+  { path: '', component: QaPageComponent, pathMatch: 'full' },
   { path: '**', redirectTo: '' }
 ];

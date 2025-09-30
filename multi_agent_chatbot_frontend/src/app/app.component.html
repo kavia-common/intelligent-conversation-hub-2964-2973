@@ -1,30 +1,18 @@
-<div class="app-shell">
-  <!-- Top Navigation Bar -->
-  <header class="topbar">
-    <div class="topbar-inner">
+<div class="qa-shell">
+  <header class="qa-header">
+    <div class="qa-header-inner">
       <div class="brand">
         <span class="brand-badge">🤖</span>
-        <span>Multi‑Agent Chatbot</span>
+        <span>Q&A • RAG + MCP</span>
         <span class="badge" title="Ocean Professional Theme">
           <span style="width:8px;height:8px;border-radius:999px;background:#2563EB;display:inline-block"></span>
-          Ocean
+          Minimal
         </span>
-      </div>
-
-      <div class="search-wrap">
-        <div class="search-input">
-          <span class="icon">🔎</span>
-          <input class="input" type="search" placeholder="Quick search chats, agents, or context..." aria-label="Quick search">
-        </div>
-      </div>
-
-      <div class="toolbar-actions">
-        <button class="btn btn-secondary" title="New Chat">＋ New</button>
-        <button class="btn btn-primary" title="Export">⬇ Export</button>
       </div>
     </div>
   </header>
 
-  <!-- Routed Views -->
-  <router-outlet></router-outlet>
+  <main class="qa-main">
+    <router-outlet></router-outlet>
+  </main>
 </div>
