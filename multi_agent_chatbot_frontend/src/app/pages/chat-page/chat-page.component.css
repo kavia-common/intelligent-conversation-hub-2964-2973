@@ -1,0 +1,4 @@
+/* Component specific overrides if needed */
+:host {
+  display: contents;
+}

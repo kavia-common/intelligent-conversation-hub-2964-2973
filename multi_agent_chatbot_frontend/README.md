@@ -1,59 +1,31 @@
-# Angular
+# Multi-Agent Chatbot Frontend (Angular)
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 19.2.1.
+Modern Angular SPA for interacting with a multi-agent, RAG-powered chatbot. Implements the Ocean Professional theme with a responsive layout: top navigation, sidebar (agents and chats), main chat area, and a context panel.
 
-## Development server
-
-To start a local development server, run:
+## Run locally
 
 ```bash
-ng serve
+npm install
+npm start
+# app runs at http://localhost:3000
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+## Features
 
-## Code scaffolding
+- Multi-agent selection (Planner, Researcher, Writer)
+- Chat history with message bubbles and timestamps
+- Agent state indicators (idle, thinking, retrieving, responding)
+- RAG context evidence snippets attached to agent replies
+- Keyboard shortcut: Ctrl/Cmd + Enter to send
+- Smooth transitions, subtle gradients, and interactive highlights
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+## Structure
 
-```bash
-ng generate component component-name
-```
+- src/app/pages/chat-page: Main page layout and UI
+- src/app/services/chat.service.ts: Mocked agent pipeline + RAG retrieval
+- src/app/models/chat.models.ts: Typed models for messages, agents, and RAG
+- src/styles.css: Global Ocean Professional theme variables and layout styles
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+## Notes
 
-```bash
-ng generate --help
-```
-
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+This frontend uses a mocked ChatService to simulate multi-agent behavior and RAG context. Integrate with your backend by replacing the mocked flows with HTTP/WebSocket calls in `ChatService`.
