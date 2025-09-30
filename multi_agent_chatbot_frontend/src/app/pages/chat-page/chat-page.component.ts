@@ -1,8 +1,10 @@
-import { Component, signal } from '@angular/core';
+import { Component, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ChatService } from '../../services/chat.service';
 import { AgentSummary, Conversation, Message } from '../../models/chat.models';
+import { ModelContextService } from '../../services/model-context.service';
+import { ProtocolStep } from '../../models/context.models';
 
 /**
  * ChatPageComponent composes the main layout:
@@ -25,6 +27,8 @@ export class ChatPageComponent {
 
   draft = signal<string>('');
   sending = signal<boolean>(false);
+
+  private mcp = inject(ModelContextService);
 
   constructor(private chat: ChatService) {
     this.agents = this.chat.getAgents();
@@ -61,7 +65,7 @@ export class ChatPageComponent {
 
   // PUBLIC_INTERFACE
   send() {
-    /** Sends the drafted message and triggers mock agent pipeline. */
+    /** Sends the drafted message and triggers agent pipeline. */
     const text = this.draft().trim();
     if (!text || this.sending()) return;
     this.sending.set(true);
@@ -89,4 +93,22 @@ export class ChatPageComponent {
 
   asUser(m: Message) { return m.role === 'user'; }
   asAgent(m: Message) { return m.role === 'agent'; }
+
+  // PUBLIC_INTERFACE
+  getProtocolSteps(turnId: string): ProtocolStep[] {
+    /** Returns protocol steps for a given turn id (snapshot). */
+    return this.mcp.get(turnId)?.steps ?? [];
+  }
+
+  // PUBLIC_INTERFACE
+  getLastProtocolTurnId(): string | undefined {
+    /**
+     * Safely returns the protocolTurnId of the last message in the active conversation.
+     * This avoids complex template expressions and parser issues.
+     */
+    const msgs = this.activeConversation?.messages;
+    if (!msgs || msgs.length === 0) return undefined;
+    const last = msgs[msgs.length - 1];
+    return (last as any)?.protocolTurnId;
+  }
 }

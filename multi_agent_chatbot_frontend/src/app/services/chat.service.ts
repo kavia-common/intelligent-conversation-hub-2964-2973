@@ -1,6 +1,8 @@
 import { Injectable } from '@angular/core';
 import { BehaviorSubject, Observable, of, delay, map, tap } from 'rxjs';
 import { AgentSummary, Conversation, Message, RagChunk, RagContext } from '../models/chat.models';
+import { ModelContextService } from './model-context.service';
+import { ContextWindowItem, ModelCallInfo, ProtocolActor } from '../models/context.models';
 
 /**
  * ChatService manages conversations, messages, agent states, and mock RAG retrieval.
@@ -8,6 +10,8 @@ import { AgentSummary, Conversation, Message, RagChunk, RagContext } from '../mo
  */
 @Injectable({ providedIn: 'root' })
 export class ChatService {
+
+  constructor(private mcp: ModelContextService) {}
 
   private uuid(): string {
     // Prefer Web Crypto UUID if available
@@ -135,51 +139,111 @@ export class ChatService {
   sendMessage(content: string): Observable<Message> {
     /**
      * Sends a user message and simulates agent pipeline:
-     * 1) Planner thinks
-     * 2) Researcher retrieves RAG
-     * 3) Writer responds using retrieved context
+     * 1) Planner plans (MCP: plan)
+     * 2) Researcher retrieves RAG (MCP: retrieve)
+     * 3) Pack context for LLM (MCP: pack)
+     * 4) Writer calls LLM to compose reply (MCP: generate)
      */
     const convId = this.activeConversationId$.value;
     const agentId = this.activeAgentId$.value;
+
+    const turnId = this.uuid();
+    this.mcp.addProtocol(turnId);
 
     const userMsg: Message = {
       id: this.uuid(),
       role: 'user',
       content,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      protocolTurnId: turnId
     };
     this.pushMessage(convId, userMsg);
 
-    this.setAgentState('planner', 'thinking', 'Analyzing task...');
-    this.setAgentState('researcher', 'idle');
-    this.setAgentState('writer', 'idle');
+    const planner: ProtocolActor = { id: 'planner', name: 'Planner', icon: '🧭' };
+    const researcher: ProtocolActor = { id: 'researcher', name: 'Researcher', icon: '🔎' };
+    const writer: ProtocolActor = { id: 'writer', name: 'Writer', icon: '✍️' };
 
-    // Step 1: Planner "thinking"
+    this.setAgentState('planner', 'thinking', 'Analyzing task...'); // UI indicator
+
+    // MCP: plan
+    this.mcp.appendStep(turnId, {
+      id: this.uuid(),
+      at: new Date().toISOString(),
+      type: 'plan',
+      actor: planner,
+      input: { text: content },
+      output: { text: 'Decompose into: (1) retrieve relevant docs, (2) synthesize an answer.' },
+      note: 'Planner created a plan to retrieve and then generate.'
+    });
+
     return of(true).pipe(
       delay(600),
       tap(() => {
         this.setAgentState('planner', 'retrieving', 'Scoping and delegating...');
+        this.mcp.appendStep(turnId, {
+          id: this.uuid(),
+          at: new Date().toISOString(),
+          type: 'route',
+          actor: planner,
+          output: { text: 'Delegate retrieval to Researcher and writing to Writer.' },
+          note: 'Planner routed subtasks to agents.'
+        });
       }),
       delay(500),
       tap(() => {
-        // Step 2: Researcher retrieves
+        // MCP: retrieve
         this.setAgentState('planner', 'responding', 'Coordinating agents...');
         this.setAgentState('researcher', 'retrieving', 'Searching knowledge base...');
-      }),
-      delay(900),
-      tap(() => {
+
         const chunks = this.mockRag(content);
+        const nowISO = new Date().toISOString();
+
+        this.mcp.appendStep(turnId, {
+          id: this.uuid(),
+          at: nowISO,
+          type: 'retrieve',
+          actor: researcher,
+          input: { text: content },
+          retrieval: {
+            query: content,
+            items: chunks.map(c => ({
+              id: c.id, source: c.source, title: c.title, snippet: c.snippet, score: c.score, url: c.url
+            }))
+          },
+          note: 'Retrieved top-k documents for grounding.'
+        });
+
         const rag: RagContext = {
           query: content,
           chunks,
-          usedAt: new Date().toISOString()
+          usedAt: nowISO
         };
 
         this.setAgentState('researcher', 'responding', 'Ranking and summarizing...');
 
-        // Step 3: Writer uses context to compose reply
+        // MCP: pack
+        const contextItems: ContextWindowItem[] = [
+          { id: this.uuid(), type: 'system', text: 'You are a helpful multi-agent assistant.' },
+          { id: this.uuid(), type: 'history', text: `User: ${content}` },
+          ...rag.chunks.slice(0, 3).map(ch => ({
+            id: ch.id,
+            type: 'retrieval' as const,
+            text: `[${ch.title ?? ch.source}] ${ch.snippet}`,
+            origin: ch.source
+          }))
+        ];
+
+        this.mcp.appendStep(turnId, {
+          id: this.uuid(),
+          at: new Date().toISOString(),
+          type: 'pack',
+          actor: planner,
+          contextWindow: contextItems,
+          note: 'Packed system, user input, and top retrievals into context window.'
+        });
+
+        // MCP: generate (LLM call)
         this.setAgentState('writer', 'thinking', 'Drafting response...');
-        // Use globalThis.setTimeout if available in this environment
         const safeSetTimeout = (fn: () => void, ms: number) => {
           try {
             if (typeof globalThis !== 'undefined' && typeof (globalThis as any).setTimeout === 'function') {
@@ -189,9 +253,19 @@ export class ChatService {
           return undefined as unknown as number;
         };
 
+        const start = Date.now();
         safeSetTimeout(() => {
           this.setAgentState('planner', 'idle');
           this.setAgentState('researcher', 'idle');
+
+          const latency = Date.now() - start;
+          const llmInfo: ModelCallInfo = {
+            model: 'mock-gpt-4o-mini',
+            params: { temperature: 0.3, max_tokens: 512, top_p: 1.0 },
+            latencyMs: latency,
+            tokens: { prompt: 320, completion: 120, total: 440 }
+          };
+
           this.setAgentState('writer', 'responding', 'Finalizing response...');
           const reply: Message = {
             id: this.uuid(),
@@ -199,9 +273,23 @@ export class ChatService {
             content: this.generateReply(content, rag),
             timestamp: new Date().toISOString(),
             agentId,
-            context: rag
+            context: rag,
+            llm: llmInfo,
+            protocolTurnId: turnId
           };
           this.pushMessage(convId, reply);
+
+          this.mcp.appendStep(turnId, {
+            id: this.uuid(),
+            at: new Date().toISOString(),
+            type: 'generate',
+            actor: writer,
+            input: { text: content, fields: { packedItems: contextItems.length } },
+            output: { text: reply.content },
+            model: llmInfo,
+            note: 'LLM produced grounded response.'
+          });
+
           this.setAgentState('writer', 'idle');
         }, 900);
       }),

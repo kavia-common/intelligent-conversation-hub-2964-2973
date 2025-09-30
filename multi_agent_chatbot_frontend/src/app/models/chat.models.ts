@@ -32,13 +32,30 @@ export interface RagContext {
   usedAt: string; // ISO
 }
 
+export interface LlmCallInfo {
+  /** The model invoked, params and token usage when available */
+  model: string;
+  params?: Record<string, number>;
+  tokens?: {
+    prompt?: number;
+    completion?: number;
+    total?: number;
+  };
+  latencyMs?: number;
+}
+
 export interface Message {
   id: string;
   role: Role;
   content: string;
   timestamp: string; // ISO
   agentId?: string;
+  /** RAG evidence bound to the message */
   context?: RagContext;
+  /** Optional LLM call information */
+  llm?: LlmCallInfo;
+  /** Optional protocol id to correlate with protocol steps */
+  protocolTurnId?: string;
 }
 
 export interface Conversation {
